@@ -1,34 +1,61 @@
 import torch
 from torch.autograd import Variable
-from torchvision import models
 import cv2
 import sys
 import numpy as np
+
 import torchvision
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
+
 import dataset
+
 from prune import *
+from models import *
+from utils import *
+
 import argparse
 from operator import itemgetter
 from heapq import nsmallest
 import time
 
+import pdb
+
+'''
 class ModifiedVGG16Model(torch.nn.Module):
    def __init__(self):
         super(ModifiedVGG16Model, self).__init__()
 
-        model = models.vgg16(pretrained=True)
+        model = models.VGG('VGG19')
         self.features = model.features
+        self.m = model
 
-        for param in self.features.parameters():
-            param.requires_grad = False
+        checkpoint = torch.load('./checkpoint/ckpt.t7')
+        model.load_state_dict(checkpoint['net'])
+        best_acc = checkpoint['acc']
+        start_epoch = checkpoint['epoch']
+        #for param in self.features.parameters():
+        #    param.requires_grad = False
 
-
-    def forward(self, x):
-        x = self.features(x)
+   def forward(self, x):
+        x = self.m.forward(x)
         return x
+'''
+def get_model():
+    model = VGG('VGG19')
+    model.to('cuda')
+    model = torch.nn.DataParallel(model)
+    #cudnn.benchmark = True
+    checkpoint = torch.load('./checkpoint/ckpt.t7')
+    model.load_state_dict(checkpoint['net'])
+    best_acc = checkpoint['acc']
+    for param in model.module.features.parameters():
+        param.requires_grad = False
+    return model
+
+
+
 
 class FilterPruner:
     def __init__(self, model, device):
@@ -50,7 +77,7 @@ class FilterPruner:
         self.activation_to_layer = {}
 
         activation_index = 0
-        for layer, (name, module) in enumerate(self.model.features._modules.items()):
+        for layer, (name, module) in enumerate(self.model.module.features._modules.items()):
             x = module(x)
             if isinstance(module, torch.nn.modules.conv.Conv2d):
                 x.register_hook(self.compute_rank)
@@ -58,7 +85,7 @@ class FilterPruner:
                 self.activation_to_layer[activation_index] = layer
                 activation_index += 1
 
-        #return self.model.classifier(x.view(x.size(0), -1))
+        return self.model.module.classifier(x.view(x.size(0), -1))
         return x
 
     def compute_rank(self, grad):
@@ -117,8 +144,8 @@ class FilterPruner:
 
 class PruningFineTuner_VGG16:
     def __init__(self, train_path, test_path, model, device):
-        self.train_data_loader = dataset.loader(32,2)
-        self.test_data_loader = dataset.test_loader(32,2)
+        self.train_data_loader = dataset.loader(32,4)
+        self.test_data_loader = dataset.test_loader(32,4)
         self.model = model
         self.device = device
         self.criterion = torch.nn.CrossEntropyLoss()
@@ -159,6 +186,7 @@ class PruningFineTuner_VGG16:
 
         if rank_filters:
             output = self.pruner.forward(input)
+            #pdb.set_trace()
             self.criterion(output, Variable(label)).backward()
         else:
             self.criterion(self.model(input), Variable(label)).backward()
@@ -182,7 +210,7 @@ class PruningFineTuner_VGG16:
 
     def total_num_filters(self):
         filters = 0
-        for name, module in self.model.features._modules.items():
+        for name, module in self.model.module.features._modules.items():
             if isinstance(module, torch.nn.modules.conv.Conv2d):
                 filters = filters + module.out_channels
         return filters
@@ -194,7 +222,7 @@ class PruningFineTuner_VGG16:
         self.model.train()
 
         #Make sure all the layers are trainable
-        for param in self.model.features.parameters():
+        for param in self.model.module.features.parameters():
             param.requires_grad = True
 
         number_of_filters = self.total_num_filters()
@@ -211,7 +239,7 @@ class PruningFineTuner_VGG16:
             layers_pruned = {}
             for layer_index, filter_index in prune_targets:
                 if layer_index not in layers_pruned:
-                    layers_pruned[layer_index] = 0
+                   layers_pruned[layer_index] = 0
                 layers_pruned[layer_index] = layers_pruned[layer_index] + 1
 
             print("Layers that will be pruned", layers_pruned)
@@ -251,9 +279,12 @@ if __name__ == '__main__':
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
     if args.train:
-        model = ModifiedVGG16Model().to(device)
+        #model = #ModifiedVGG16Model().to(device)
+        model = get_model()
     elif args.prune:
-        model = torch.load("model").to(device)
+        #model = torch.load("model").to(device)
+        model = get_model()
+
 
     fine_tuner = PruningFineTuner_VGG16(args.train_path, args.test_path, model, device)
 
